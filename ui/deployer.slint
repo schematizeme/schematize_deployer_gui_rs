@@ -1,0 +1,610 @@
+// Janela do schematize-deployer. Casca visual fina: todos os dados vêm do binário
+// `schematize-deployer` (headless) e todas as ações disparam callbacks tratados no main.rs.
+//
+// O TEMA, o `Btn` e a `Ficha` são cópia das janelas irmãs. Isso é PLATAFORMA (D4): não sabem o
+// que é chave, host ou cofre — sabem cor, borda e clique. Se um dia algo de domínio migrar para
+// cá, o corte foi feito errado.
+
+global Th {
+    in-out property <bool> dark: true;
+    out property <color> bg:          dark ? #14161c : #e8ecf4;
+    out property <color> surface:     dark ? #1b1e27 : #ffffff;
+    out property <color> surface-2:   dark ? #222634 : #dce3f0;
+    out property <color> border:      dark ? #2b3040 : #bfc9dc;
+    out property <color> text:        dark ? #e6e9f2 : #12151d;
+    out property <color> text-dim:    dark ? #8a90a2 : #475062;
+    out property <color> accent:      #5b8cff;
+    out property <color> accent-soft: dark ? #2a3a66 : #cedcff;
+    out property <color> good:        #3ecf8e;
+    out property <color> warn:        #e6b23a;
+    out property <color> header-fg:   dark ? #9db4ff : #2b48bd;
+}
+
+// (O `Chip` da janela do market não veio: aqui o par rótulo→valor é a `Ficha`, logo abaixo,
+// que trata o valor VAZIO como travessão — porque nesta tela um campo pode legitimamente não
+// ter número, e branco pareceria campo que não carregou.)
+
+// Botão custom (mantém o tema; std-widgets traria estilo próprio).
+component Btn inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 40px;
+    border-radius: 10px;
+    border-width: primary ? 0px : 1px;
+    border-color: Th.border;
+    background: !enabled ? Th.surface-2
+        : primary ? (touch.has-hover ? #6f9bff : Th.accent)
+        : (touch.has-hover ? Th.accent-soft : Th.surface);
+    opacity: enabled ? 1.0 : 0.5;
+    animate background { duration: 120ms; }
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        Text {
+            text: label;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            color: primary ? #ffffff : Th.text;
+            font-size: 14px;
+            font-weight: 600;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+}
+
+
+// Um par rótulo→valor, para as fichas do diagnóstico.
+component Ficha inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <color> value-color: Th.text;
+    background: Th.surface-2;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Th.border;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 3px;
+        Text { text: label; color: Th.text-dim; font-size: 11px; }
+        Text {
+            // Vazio vira travessão: um espaço em branco parece campo que não carregou, e o
+            // travessão diz "não sei" — que é a verdade quando a leitura não trouxe o número.
+            text: value == "" ? "—" : value;
+            color: value == "" ? Th.text-dim : value-color;
+            font-size: 14px;
+            font-weight: 600;
+            overflow: elide;
+        }
+    }
+}
+
+
+// Uma chave SSH na tela. Espelha `telas::Chave` do Rust.
+//
+// NÃO HÁ CAMPO PARA A PRIVADA, e a ausência é a barreira (D5). O contrato não a traz, este
+// struct não teria onde guardá-la, e há um teste do lado do Rust que varre os modelos atrás de
+// material de chave. A confirmação de identidade é o `fingerprint`, que é público.
+export struct ChaveUI {
+    nome: string,
+    algoritmo: string,
+    fingerprint: string,
+    comentario: string,
+    caminho-publica: string,
+    op-rotulo: string,
+}
+
+// Um host registrado. Espelha `telas::Host`.
+export struct HostUI {
+    alias: string,
+    destino: string,
+    chave: string,
+    ambiente: string,
+    producao: bool,
+    modo: string,
+    confiado: bool,
+    fingerprint: string,
+    fronteira: string,
+    fronteira-servidor: bool,
+    op-rotulo: string,
+}
+
+export component MainWindow inherits Window {
+    title: "schematize · deployer";
+    preferred-width: 820px;
+    preferred-height: 640px;
+    min-width: 620px;
+    min-height: 480px;
+    background: Th.bg;
+
+    in-out property <bool> dark <=> Th.dark;
+    // 0 = Chaves, 1 = Hosts, 2 = Cofre.
+    in-out property <int> aba: 0;
+    in-out property <string> versao: "—";
+
+    // ---- chaves ----
+    in-out property <[ChaveUI]> chaves;
+    in-out property <string> chaves-erro;
+
+    // ---- hosts ----
+    in-out property <[HostUI]> hosts;
+    in-out property <string> hosts-erro;
+
+    // ---- cofre ----
+    in-out property <bool> cofre-existe: false;
+    in-out property <string> cofre-caminho;
+    in-out property <string> cofre-tamanho;
+    in-out property <string> cofre-permissao;
+    in-out property <bool> cofre-permissao-ok: false;
+    in-out property <string> cofre-kdf;
+    in-out property <bool> cofre-kdf-fraco: false;
+    in-out property <string> cofre-erro;
+
+    in-out property <string> msg;
+
+    callback recarregar();
+    callback alternar-tema();
+    callback gerar-chave();
+    callback importar-chave();
+    callback copiar-publica(int);
+    callback adicionar-host();
+    callback conectar(int);
+    callback confiar(int);
+    callback destrancar-cofre();
+    callback criar-cofre();
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 14px;
+
+        // ---- Cabeçalho + abas ----
+        HorizontalLayout {
+            spacing: 10px;
+            VerticalLayout {
+                Text {
+                    text: "Deployer";
+                    color: Th.header-fg;
+                    font-size: 20px;
+                    font-weight: 800;
+                }
+                Text {
+                    text: "schematize-deployer " + root.versao;
+                    color: Th.text-dim;
+                    font-size: 12px;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            HorizontalLayout {
+                spacing: 8px;
+                Btn { label: "Chaves"; primary: root.aba == 0; clicked => { root.aba = 0; } }
+                Btn { label: "Hosts";  primary: root.aba == 1; clicked => { root.aba = 1; } }
+                Btn { label: "Cofre";  primary: root.aba == 2; clicked => { root.aba = 2; } }
+                Btn { label: root.dark ? "☾" : "☀"; clicked => { root.alternar-tema(); } }
+            }
+        }
+        Rectangle { height: 1px; background: Th.border; }
+
+        // ================= ABA CHAVES =================
+        if root.aba == 0: VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 8px;
+                Btn { label: "Gerar chave"; primary: true; clicked => { root.gerar-chave(); } }
+                Btn { label: "Importar"; clicked => { root.importar-chave(); } }
+                Btn { label: "Recarregar"; clicked => { root.recarregar(); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            // Gerar e importar abrem TERMINAL: gerar pede uma passphrase, e importar pode
+            // pedir a de uma chave que já tem. Passphrase digitada numa janela Slint iria para
+            // a memória deste processo sem precisar ir — o `ssh-keygen` já sabe lê-la sem eco.
+            Text {
+                text: "Gerar e importar abrem um TERMINAL: a passphrase é lida lá, sem eco, pelo próprio ssh-keygen — ela não precisa passar por esta janela, então não passa.";
+                font-size: 11.5px;
+                color: Th.text-dim;
+                wrap: word-wrap;
+            }
+
+            if root.chaves-erro != "": Rectangle {
+                vertical-stretch: 1;
+                background: Th.surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Th.warn;
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 8px;
+                    alignment: center;
+                    Text {
+                        text: "Não consegui listar as chaves";
+                        color: Th.warn;
+                        font-size: 15px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.chaves-erro;
+                        color: Th.text-dim;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            // Lista VAZIA é fato, e diz o que fazer. Uma tela em branco aqui seria a janela
+            // afirmando que não há nada, sem dizer o que a pessoa pode fazer a respeito.
+            if root.chaves-erro == "" && root.chaves.length == 0: VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                Text {
+                    text: "Nenhuma chave em ~/.ssh ainda.";
+                    font-size: 14px;
+                    color: Th.text-dim;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Clique em «Gerar chave» para criar a primeira.";
+                    font-size: 12.5px;
+                    color: Th.text-dim;
+                    horizontal-alignment: center;
+                }
+            }
+            if root.chaves-erro == "" && root.chaves.length > 0: Flickable {
+                vertical-stretch: 1;
+                viewport-width: self.width;
+                viewport-height: lk.preferred-height;
+                lk := VerticalLayout {
+                    width: parent.width;
+                    spacing: 10px;
+                    for k[i] in root.chaves: Rectangle {
+                        border-radius: 12px;
+                        background: Th.surface;
+                        border-width: 1px;
+                        border-color: Th.border;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: k.nome;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    color: Th.text;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: k.algoritmo;
+                                    font-size: 12px;
+                                    color: Th.text-dim;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                if k.op-rotulo != "": Text {
+                                    text: k.op-rotulo;
+                                    font-size: 12px;
+                                    color: Th.text-dim;
+                                    vertical-alignment: center;
+                                }
+                                Btn {
+                                    label: "Copiar a pública";
+                                    clicked => { root.copiar-publica(i); }
+                                }
+                            }
+                            // O FINGERPRINT é o que a tela mostra para confirmar identidade —
+                            // ele é o hash da chave PÚBLICA, e serve exatamente para confirmar
+                            // sem mostrar. A privada não aparece aqui nem em lugar nenhum.
+                            Text {
+                                text: k.fingerprint;
+                                font-size: 12px;
+                                font-family: "monospace";
+                                color: Th.text-dim;
+                                wrap: word-wrap;
+                            }
+                            if k.comentario != "": Text {
+                                text: k.comentario;
+                                font-size: 11.5px;
+                                color: Th.text-dim;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= ABA HOSTS =================
+        if root.aba == 1: VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 8px;
+                Btn { label: "Adicionar host"; primary: true; clicked => { root.adicionar-host(); } }
+                Btn { label: "Recarregar"; clicked => { root.recarregar(); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Text {
+                text: "Conectar abre um TERMINAL: uma sessão SSH é interativa, e não cabe numa janela Slint.";
+                font-size: 11.5px;
+                color: Th.text-dim;
+                wrap: word-wrap;
+            }
+
+            if root.hosts-erro != "": Rectangle {
+                vertical-stretch: 1;
+                background: Th.surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Th.warn;
+                VerticalLayout {
+                    padding: 20px;
+                    alignment: center;
+                    Text {
+                        text: root.hosts-erro;
+                        color: Th.text-dim;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            if root.hosts-erro == "" && root.hosts.length == 0: VerticalLayout {
+                vertical-stretch: 1;
+                alignment: center;
+                Text {
+                    text: "Nenhum host registrado ainda.";
+                    font-size: 14px;
+                    color: Th.text-dim;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "Clique em «Adicionar host» para registrar o primeiro.";
+                    font-size: 12.5px;
+                    color: Th.text-dim;
+                    horizontal-alignment: center;
+                }
+            }
+            if root.hosts-erro == "" && root.hosts.length > 0: Flickable {
+                vertical-stretch: 1;
+                viewport-width: self.width;
+                viewport-height: lh.preferred-height;
+                lh := VerticalLayout {
+                    width: parent.width;
+                    spacing: 10px;
+                    for h[i] in root.hosts: Rectangle {
+                        border-radius: 12px;
+                        background: Th.surface;
+                        border-width: 1px;
+                        // Produção destacada: errar em prd custa mais que errar em dev, e a
+                        // borda é o que faz a pessoa notar ANTES de clicar em conectar.
+                        border-color: h.producao ? Th.warn : Th.border;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: h.alias;
+                                    font-size: 14px;
+                                    font-weight: 700;
+                                    color: Th.text;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    height: 22px;
+                                    width: amb.preferred-width + 20px;
+                                    border-radius: 11px;
+                                    property <color> tom: h.producao ? Th.warn : Th.text-dim;
+                                    background: tom.transparentize(0.85);
+                                    border-width: 1px;
+                                    border-color: tom.transparentize(0.5);
+                                    amb := Text {
+                                        text: h.ambiente;
+                                        color: h.producao ? Th.warn : Th.text-dim;
+                                        font-size: 11.5px;
+                                        font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                if h.op-rotulo != "": Text {
+                                    text: h.op-rotulo;
+                                    font-size: 12px;
+                                    color: Th.text-dim;
+                                    vertical-alignment: center;
+                                }
+                                if !h.confiado: Btn {
+                                    label: "Conferir a host key";
+                                    clicked => { root.confiar(i); }
+                                }
+                                Btn {
+                                    label: "Conectar";
+                                    primary: true;
+                                    clicked => { root.conectar(i); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Ficha { label: "Destino"; value: h.destino; horizontal-stretch: 1; }
+                                Ficha { label: "Chave"; value: h.chave; horizontal-stretch: 1; }
+                                Ficha { label: "Política"; value: h.modo; horizontal-stretch: 1; }
+                            }
+                            // A FRONTEIRA por extenso. "sem" sozinho é informação que não
+                            // informa: a pessoa precisa saber que ali só a política deste
+                            // cliente protege, e que isso pega acidente, não intenção.
+                            Text {
+                                text: h.fronteira;
+                                font-size: 12px;
+                                color: h.fronteira-servidor ? Th.text-dim : Th.warn;
+                                wrap: word-wrap;
+                            }
+                            // Host key ainda não conferida é ESTADO, e a tela diz o que fazer.
+                            Text {
+                                text: h.confiado
+                                    ? "host key pinada · " + h.fingerprint
+                                    : "host key ainda NÃO conferida — clique em «Conferir a host key»";
+                                font-size: 11.5px;
+                                font-family: "monospace";
+                                color: h.confiado ? Th.text-dim : Th.warn;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ================= ABA COFRE =================
+        //
+        // Esta tela fala do ARQUIVO — onde está, que permissão tem, com que custo de KDF foi
+        // criado. O que está DENTRO só aparece depois de destrancar, e mesmo então só os NOMES
+        // das chaves guardadas, nunca os valores (D5).
+        if root.aba == 2: VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 12px;
+
+            if root.cofre-erro != "": Text {
+                text: root.cofre-erro;
+                font-size: 12px;
+                color: Th.warn;
+                wrap: word-wrap;
+            }
+
+            // COFRE AUSENTE é estado de primeira classe: é o estado inicial de toda
+            // instalação, e uma tela de erro aqui seria lida como "quebrou".
+            if root.cofre-erro == "" && !root.cofre-existe: Rectangle {
+                background: Th.surface;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: Th.border;
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 10px;
+                    Text {
+                        text: "Ainda não há cofre nesta máquina";
+                        font-size: 15px;
+                        font-weight: 700;
+                        color: Th.text;
+                    }
+                    Text {
+                        text: "O cofre guarda segredo em repouso, ilegível para quem tem o disco. Criá-lo pede uma passphrase — lida no terminal, sem eco, e nunca por esta janela.";
+                        font-size: 12.5px;
+                        color: Th.text-dim;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: "Ficaria em: " + root.cofre-caminho;
+                        font-size: 11.5px;
+                        font-family: "monospace";
+                        color: Th.text-dim;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Btn { label: "Criar o cofre"; primary: true; clicked => { root.criar-cofre(); } }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                }
+            }
+
+            // COFRE TRANCADO — o estado normal de quem tem cofre. Também não é erro: é o
+            // cofre fazendo o que ele existe para fazer.
+            if root.cofre-erro == "" && root.cofre-existe: VerticalLayout {
+                spacing: 12px;
+                Rectangle {
+                    background: Th.surface;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: Th.border;
+                    VerticalLayout {
+                        padding: 18px;
+                        spacing: 10px;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Text {
+                                text: "Cofre trancado";
+                                font-size: 15px;
+                                font-weight: 700;
+                                color: Th.text;
+                                vertical-alignment: center;
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            Btn { label: "Destrancar"; primary: true; clicked => { root.destrancar-cofre(); } }
+                        }
+                        Text {
+                            text: "Destrancar abre um TERMINAL: a passphrase é lida lá, sem eco. Ela não precisa passar por esta janela, então não passa — e enquanto o cofre está aberto a chave existe em memória, o que é o limite de qualquer cofre de desktop.";
+                            font-size: 12px;
+                            color: Th.text-dim;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Ficha { label: "Tamanho"; value: root.cofre-tamanho; horizontal-stretch: 1; }
+                    Ficha {
+                        label: "Permissão";
+                        value: root.cofre-permissao;
+                        // Qualquer coisa diferente de 600 deixa o arquivo legível por mais
+                        // gente do que devia — e isso tem de saltar aos olhos.
+                        value-color: root.cofre-permissao-ok ? Th.good : Th.warn;
+                        horizontal-stretch: 1;
+                    }
+                }
+                Rectangle {
+                    background: Th.surface;
+                    border-radius: 12px;
+                    border-width: 1px;
+                    border-color: root.cofre-kdf-fraco ? Th.warn : Th.border;
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 6px;
+                        Text {
+                            text: "Custo para adivinhar a passphrase (Argon2id)";
+                            font-size: 13px;
+                            font-weight: 700;
+                            color: Th.text;
+                        }
+                        Text {
+                            text: root.cofre-kdf;
+                            font-size: 12.5px;
+                            color: Th.text-dim;
+                            wrap: word-wrap;
+                        }
+                        // O cabeçalho viaja em claro de propósito — é preciso para derivar a
+                        // chave. Mostrá-lo é o que deixa auditável se ESTE cofre foi criado
+                        // com custo forte, ou herdou um custo fraco de uma versão antiga.
+                        if root.cofre-kdf-fraco: Text {
+                            text: "Este cofre foi criado com um custo ABAIXO do padrão atual. Trocar a passphrase o regrava com o custo de hoje.";
+                            font-size: 12px;
+                            color: Th.warn;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                Text {
+                    text: root.cofre-caminho;
+                    font-size: 11.5px;
+                    font-family: "monospace";
+                    color: Th.text-dim;
+                    wrap: word-wrap;
+                }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+
+        if root.msg != "": Text {
+            text: root.msg;
+            font-size: 12px;
+            color: Th.text-dim;
+            wrap: word-wrap;
+        }
+    }
+}
