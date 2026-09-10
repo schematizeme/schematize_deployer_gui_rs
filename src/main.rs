@@ -179,6 +179,11 @@ fn no_terminal(args: &[&str]) -> String {
 fn aba_inicial(args: impl Iterator<Item = String>) -> i32 {
     for a in args {
         match a.as_str() {
+            // `--chaves` é redundante com o default e existe de propósito: o hub passa a aba
+            // que a pessoa pediu, sempre, e um chamador que precisa saber que "sem flag é
+            // chaves" é um chamador acoplado ao default. Se o default mudar um dia, quem
+            // passou `--chaves` continua indo para chaves.
+            "--chaves" | "--keys" => return 0,
             "--hosts" | "--vps" => return 1,
             "--cofre" | "--vault" => return 2,
             _ => {}
@@ -272,6 +277,17 @@ mod tests_aba {
     #[test]
     fn sem_argumento_abre_em_chaves() {
         assert_eq!(aba_inicial(std::iter::empty()), 0);
+    }
+
+    /// **`--chaves` é EXPLÍCITO, e não redundante à toa.** Ele leva à mesma aba que a
+    /// ausência de flag — mas um chamador que dependesse de "sem flag é chaves" ficaria
+    /// acoplado ao default. O hub passa a aba que a pessoa pediu, sempre; se o default mudar
+    /// um dia, quem passou `--chaves` continua indo para chaves.
+    #[test]
+    fn chaves_e_explicito_mesmo_sendo_o_default() {
+        for flag in ["--chaves", "--keys"] {
+            assert_eq!(aba_inicial([flag.to_string()].into_iter()), 0, "{flag}");
+        }
     }
 
     /// Cada aba tem duas grafias: a do produto e a do subcomando que a alimenta.
