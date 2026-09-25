@@ -2,5 +2,5 @@
 //! Mantém o .slint como arquivo de verdade (LSP do Slint, diff limpo).
 
 fn main() {
-    slint_build::compile("ui/deployer.slint").expect("falha ao compilar ui/optimizer.slint");
+    slint_build::compile("ui/deployer.slint").expect("falha ao compilar ui/deployer.slint");
 }

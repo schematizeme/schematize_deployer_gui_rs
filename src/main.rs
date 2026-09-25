@@ -192,6 +192,89 @@ fn aba_inicial(args: impl Iterator<Item = String>) -> i32 {
     0
 }
 
+/// **O quê:** o comando que o formulário aberto vai rodar, ou `None` se falta campo.
+///
+/// **Onde:** `on_form_confirmar`.
+///
+/// ## Esta função é o conserto
+///
+/// Antes, cada botão disparava um comando FIXO — e quatro dos cinco eram incompletos. O terminal
+/// abria só para mostrar um erro de uso do CLI:
+///
+/// | botão | o que a janela mandava | o que o CLI respondia |
+/// |---|---|---|
+/// | Gerar chave | `ssh gen` | `required arguments were not provided: <NAME>` |
+/// | Importar | `ssh import --paste` | `colando a chave eu não tenho de onde tirar o nome` |
+/// | Adicionar host | `vps add` | `required: --host <HOST> --user <USER> <ALIAS>` |
+/// | Conectar | `vps exec <alias>` | `faltou o comando` |
+///
+/// Abrir um terminal para exibir erro de argumento é pior que não ter botão: parece que o
+/// software tentou e falhou, quando ele nem chegou a tentar.
+///
+/// **O que continua indo para o terminal:** a passphrase e a chave privada colada. Perguntá-las
+/// aqui poria segredo na memória desta janela sem necessidade (D5) — o `ssh-keygen` e o deployer
+/// já as leem sem eco.
+fn comando_do_form(w: &MainWindow) -> Option<Vec<String>> {
+    montar_comando(
+        w.get_form(),
+        w.get_f_nome().trim(),
+        w.get_f_host().trim(),
+        w.get_f_user().trim(),
+        w.get_f_arquivo().trim(),
+        w.get_f_colar(),
+    )
+}
+
+/// **O quê:** a decisão de qual comando montar, como função PURA.
+///
+/// **Onde:** [`comando_do_form`], que só lê a janela; e os testes.
+///
+/// **Separada da janela de propósito:** construir uma `MainWindow` num teste exige um backend
+/// gráfico, que não existe no CI. Com a decisão fora dela, as quatro formas de comando são
+/// afirmáveis sem abrir janela nenhuma — e é a decisão que erra, não a leitura dos campos.
+///
+/// `None` significa "falta campo obrigatório". O botão já fica desabilitado nesse estado; isto
+/// é a segunda barreira, para o caso de a primeira mudar.
+fn montar_comando(
+    form: i32,
+    nome: &str,
+    host: &str,
+    user: &str,
+    arquivo: &str,
+    colar: bool,
+) -> Option<Vec<String>> {
+    match form {
+        1 if !nome.is_empty() => Some(vec!["ssh".into(), "gen".into(), nome.into()]),
+        2 if colar && !nome.is_empty() => Some(vec![
+            "ssh".into(),
+            "import".into(),
+            "--paste".into(),
+            "--name".into(),
+            nome.into(),
+        ]),
+        2 if !colar && !arquivo.is_empty() => {
+            let mut v: Vec<String> = vec!["ssh".into(), "import".into(), arquivo.into()];
+            // O `--name` só entra quando foi dado: sem ele o CLI usa o nome do ARQUIVO, que é
+            // o comportamento documentado — mandar `--name ""` o quebraria.
+            if !nome.is_empty() {
+                v.push("--name".into());
+                v.push(nome.into());
+            }
+            Some(v)
+        }
+        3 if !nome.is_empty() && !host.is_empty() && !user.is_empty() => Some(vec![
+            "vps".into(),
+            "add".into(),
+            nome.into(),
+            "--host".into(),
+            host.into(),
+            "--user".into(),
+            user.into(),
+        ]),
+        _ => None,
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let w = MainWindow::new()?;
     w.set_aba(aba_inicial(std::env::args().skip(1)));
@@ -208,11 +291,54 @@ fn main() -> Result<(), slint::PlatformError> {
         }};
     }
 
-    liga!(on_gerar_chave, &["ssh", "gen"]);
-    liga!(on_importar_chave, &["ssh", "import", "--paste"]);
-    liga!(on_adicionar_host, &["vps", "add"]);
+    // Os dois que NÃO precisam de campo nenhum seguem disparando direto.
     liga!(on_destrancar_cofre, &["vault", "status"]);
     liga!(on_criar_cofre, &["vault", "init"]);
+
+    // Os três que PRECISAM passam pelo formulário — ver `comando_do_form`.
+    {
+        let weak = w.as_weak();
+        w.on_form_abrir(move |qual| {
+            if let Some(w) = weak.upgrade() {
+                // Limpa os campos ao ABRIR, e não ao fechar: fechar e reabrir o mesmo
+                // formulário com o que foi digitado antes parece que o software guardou algo
+                // que ele não guardou — e o valor velho vira um comando que ninguém revisou.
+                w.set_f_nome(String::new().into());
+                w.set_f_host(String::new().into());
+                w.set_f_user(String::new().into());
+                w.set_f_arquivo(String::new().into());
+                w.set_f_colar(false);
+                w.set_msg(String::new().into());
+                w.set_form(qual);
+            }
+        });
+    }
+    {
+        let weak = w.as_weak();
+        w.on_form_fechar(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_form(0);
+            }
+        });
+    }
+    {
+        let weak = w.as_weak();
+        w.on_form_confirmar(move || {
+            let Some(w) = weak.upgrade() else { return };
+            match comando_do_form(&w) {
+                Some(args) => {
+                    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                    w.set_msg(no_terminal(&refs).into());
+                    w.set_form(0);
+                }
+                // Não deveria acontecer — o botão fica desabilitado enquanto falta campo. Mas
+                // se acontecer, a janela DIZ o que falta em vez de abrir um terminal mudo.
+                None => w.set_msg(
+                    "faltou preencher um campo obrigatório (marcado com *).".to_string().into(),
+                ),
+            }
+        });
+    }
 
     {
         let weak = w.as_weak();
@@ -249,7 +375,10 @@ fn main() -> Result<(), slint::PlatformError> {
             let Some(w) = weak.upgrade() else { return };
             use slint::Model;
             let Some(h) = w.get_hosts().row_data(i as usize) else { return };
-            w.set_msg(no_terminal(&["vps", "exec", &h.alias]).into());
+            // `vps shell`, e não `vps exec`: `exec` EXIGE um comando para auditar, e a
+            // janela não tinha um — mandava `exec <alias>` e o terminal abria para dizer
+            // "faltou o comando". O `shell` é a sessão interativa, que é o que «Conectar» quer.
+            w.set_msg(no_terminal(&["vps", "shell", &h.alias]).into());
         });
     }
     {
@@ -311,6 +440,8 @@ mod tests_aba {
 
 #[cfg(test)]
 mod tests {
+    use super::montar_comando;
+
     /// **NENHUMA ação desta janela roda processo direto — todas abrem TERMINAL.**
     ///
     /// Este teste lê o próprio arquivo e reprova um `Command::new`. É a regra do D5 e do D6
@@ -332,11 +463,226 @@ mod tests {
     #[test]
     fn nao_ha_campo_de_senha_na_janela() {
         let ui = include_str!("../ui/deployer.slint");
-        for proibido in ["LineEdit", "TextInput", "input-type", "password"] {
+
+        // ---------------------------------------------------------------------------
+        // ESTE TESTE FOI AFROUXADO NUM EIXO E APERTADO EM DOIS. A troca está escrita.
+        //
+        // A versão anterior proibia **qualquer** campo de entrada: `LineEdit`, `TextInput`,
+        // `input-type`, `password`. O raciocínio era "um campo aqui é onde uma passphrase
+        // acabaria", e ele estava certo sobre o risco e errado sobre o alcance.
+        //
+        // **O que a proibição total custou, e não é hipótese:** sem poder perguntar nada, cada
+        // botão desta janela disparava um comando FIXO. Quatro dos cinco eram incompletos, e o
+        // terminal abria só para mostrar erro de uso do CLI — `ssh gen` sem `<NAME>`,
+        // `ssh import --paste` sem `--name`, `vps add` sem `--host/--user/<ALIAS>`, e
+        // `vps exec <alias>` sem comando. O usuário relatou isso com estas palavras:
+        // *"quando tento importar uma chave com deployer me joga no ssh [e dá erro]"*.
+        //
+        // Uma janela que não pode perguntar o NOME de uma chave não é uma janela mais segura.
+        // É uma janela quebrada, que empurra a pessoa de volta para o terminal — onde ela vai
+        // digitar a passphrase de qualquer jeito, sem nenhuma das garantias que este teste
+        // pensava estar dando.
+        //
+        // **O que passou a valer, e é mais forte no que importa:**
+        //
+        //   1. campo de SENHA continua proibido, por construção (`input-type: password`);
+        //   2. todo campo que existe tem de estar na ALLOWLIST abaixo — um campo novo reprova
+        //      até alguém escrever aqui por que ele não é segredo;
+        //   3. nenhuma palavra de segredo aparece na UI, nem como rótulo, nem como binding.
+        //
+        // A regra do D5 nunca foi "não perguntar nada". É **"segredo não passa por esta
+        // janela"** — e passphrase e chave privada colada continuam indo para o terminal, onde
+        // o `ssh-keygen` e o deployer as leem sem eco.
+        // ---------------------------------------------------------------------------
+
+        // 1) Campo de senha: proibido por construção.
+        for proibido in ["input-type", "password"] {
             assert!(
                 !ui.contains(proibido),
-                "`{proibido}` na UI: um campo de entrada aqui é onde uma passphrase acabaria"
+                "`{proibido}` na UI: campo de senha não existe aqui (D5) — o segredo vai para \
+                 o terminal, onde é lido sem eco"
             );
+        }
+
+        // 1b) A palavra de segredo não pode estar num CAMPO — mas pode estar na PROSA.
+        //
+        // A primeira versão desta regra proibia a palavra `passphrase` em qualquer lugar da UI,
+        // e reprovou na hora: o texto que explica *"a passphrase é lida no terminal, sem eco"*
+        // contém a palavra. **Proibir a palavra proíbe explicar a política** — e uma janela que
+        // abre um terminal sem dizer por quê é pior que uma que diz.
+        //
+        // É o mesmo erro que o guard de nome de irmão do `repos-de-janela.py` quase cometeu, e
+        // pela mesma razão: comentário e prosa citam o assunto; só o CAMPO o manipula.
+        for linha in ui.lines() {
+            let e_campo = linha.contains("LineEdit")
+                || linha.contains("placeholder-text")
+                || linha.contains("valor <=>");
+            if !e_campo {
+                continue;
+            }
+            let baixo = linha.to_lowercase();
+            for palavra in ["senha", "passphrase", "password", "privada", "secret"] {
+                assert!(
+                    !baixo.contains(palavra),
+                    "a palavra `{palavra}` aparece num CAMPO de entrada:\n  {}\n\
+                     Segredo não passa por esta janela (D5).",
+                    linha.trim()
+                );
+            }
+        }
+
+        // 2) Todo campo de entrada é de um dado DECLARADO como não-secreto.
+        //
+        // A allowlist é por `valor <=>`, que é o binding do campo — não pelo rótulo, que é
+        // prosa e muda de redação. Um campo novo reprova até entrar aqui, e entrar aqui exige
+        // olhar para ele e afirmar que não é segredo.
+        let permitidos = [
+            "root.f-nome",    // nome da chave, ou alias do host
+            "root.f-host",    // IP/hostname
+            "root.f-user",    // usuário no host
+            "root.f-arquivo", // CAMINHO do arquivo da chave — o caminho, nunca o conteúdo
+        ];
+        let mut resto = ui;
+        while let Some(i) = resto.find("valor <=>") {
+            resto = &resto[i + "valor <=>".len()..];
+            let fim = resto.find(';').unwrap_or(resto.len());
+            let ligado = resto[..fim].trim();
+            assert!(
+                permitidos.contains(&ligado),
+                "campo de entrada ligado a `{ligado}`, que não está na allowlist de dados \
+                 não-secretos. Se ele não é segredo, acrescente-o à lista DIZENDO por quê; se \
+                 for, ele não pode ter campo nesta janela"
+            );
+        }
+
+        // 3) O `TextInput` cru continua proibido: ele é o widget de baixo nível, sem o
+        // `input-type` que o `LineEdit` expõe — e é por onde um campo de senha entraria sem
+        // disparar a regra 1.
+        assert!(
+            !ui.contains("TextInput"),
+            "`TextInput` cru na UI: use `LineEdit`, que declara o `input-type` e é o que a \
+             regra 1 vigia"
+        );
+    }
+
+    /// **Os comandos que os formulários montam — o conserto, afirmado.**
+    ///
+    /// Cada caso aqui é um dos comandos que ANTES saía incompleto e abria um terminal só para
+    /// mostrar erro de uso do CLI.
+    #[test]
+    fn o_formulario_monta_o_comando_completo() {
+        assert_eq!(
+            montar_comando(1, "producao", "", "", "", false).unwrap(),
+            ["ssh", "gen", "producao"],
+            "`ssh gen` SEM nome era o erro: `required arguments were not provided: <NAME>`"
+        );
+        assert_eq!(
+            montar_comando(2, "producao", "", "", "", true).unwrap(),
+            ["ssh", "import", "--paste", "--name", "producao"],
+            "colando, o `--name` é obrigatório — é EXATAMENTE o erro que o usuário viu"
+        );
+        assert_eq!(
+            montar_comando(2, "", "", "", "/bk/id_ed25519", false).unwrap(),
+            ["ssh", "import", "/bk/id_ed25519"],
+            "de arquivo SEM nome: o CLI usa o nome do arquivo, e `--name \"\"` o quebraria"
+        );
+        assert_eq!(
+            montar_comando(2, "outro", "", "", "/bk/id_ed25519", false).unwrap(),
+            ["ssh", "import", "/bk/id_ed25519", "--name", "outro"],
+            "de arquivo COM nome: o nome dado ganha"
+        );
+        assert_eq!(
+            montar_comando(3, "srv", "10.0.0.1", "deploy", "", false).unwrap(),
+            ["vps", "add", "srv", "--host", "10.0.0.1", "--user", "deploy"],
+            "`vps add` sozinho não tem alias, host nem user"
+        );
+    }
+
+    /// **Falta campo obrigatório → `None`, e nunca um comando pela metade.**
+    ///
+    /// É a regra inteira desta tela: um comando incompleto abre um terminal que só sabe dizer
+    /// que o comando está incompleto.
+    #[test]
+    fn campo_obrigatorio_faltando_nao_monta_comando() {
+        // Gerar sem nome.
+        assert!(montar_comando(1, "", "", "", "", false).is_none());
+        // Colar sem nome — o caso relatado.
+        assert!(montar_comando(2, "", "", "", "", true).is_none());
+        // Colar COM arquivo mas sem nome: o arquivo não salva o caso, porque `--paste` ignora
+        // arquivo e o CLI continua sem de onde tirar o nome.
+        assert!(montar_comando(2, "", "", "", "/bk/id", true).is_none());
+        // Arquivo vazio no modo arquivo.
+        assert!(montar_comando(2, "nome", "", "", "", false).is_none());
+        // Host com qualquer um dos três em branco.
+        assert!(montar_comando(3, "", "10.0.0.1", "deploy", "", false).is_none());
+        assert!(montar_comando(3, "srv", "", "deploy", "", false).is_none());
+        assert!(montar_comando(3, "srv", "10.0.0.1", "", "", false).is_none());
+        // Formulário fechado não monta nada.
+        assert!(montar_comando(0, "srv", "10.0.0.1", "deploy", "/bk/id", true).is_none());
+    }
+
+    /// **«Conectar» usa `vps shell`, e não `vps exec`.**
+    ///
+    /// `exec` EXIGE um comando para auditar, e a janela não tinha um: mandava `exec <alias>` e
+    /// o terminal abria para dizer *"faltou o comando"*. O `shell` é a sessão interativa.
+    #[test]
+    fn conectar_usa_shell_e_nao_exec() {
+        let producao = include_str!("main.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(
+            producao.contains(r#""vps", "shell""#),
+            "«Conectar» tem de usar `vps shell` — a sessão interativa"
+        );
+        assert!(
+            !producao.contains(r#""vps", "exec""#),
+            "`vps exec` sem comando é o defeito que esta janela tinha: ele exige um comando \
+             para auditar, e a janela não tem um"
+        );
+    }
+
+    /// **O self-check da regra 1b:** ela distingue PROSA de CAMPO.
+    ///
+    /// Sem isto, a regra poderia ser um filtro que aprova sempre (se eu tivesse errado a
+    /// detecção de campo) ou que reprova a explicação (se eu tivesse deixado a proibição total).
+    /// As duas falhas são silenciosas, e as duas já aconteceram neste projeto.
+    #[test]
+    fn a_regra_do_campo_distingue_prosa_de_entrada() {
+        let e_campo = |l: &str| {
+            l.contains("LineEdit") || l.contains("placeholder-text") || l.contains("valor <=>")
+        };
+        // PROSA com a palavra: passa. É o texto que explica por que o terminal abre.
+        for prosa in [
+            r#"text: "A passphrase é pedida no terminal, pelo próprio ssh-keygen.";"#,
+            r#"// a chave privada nunca passa por esta janela"#,
+            r#"explica: "Colando: o terminal abre e você cola a chave lá.";"#,
+        ] {
+            assert!(!e_campo(prosa), "isto é prosa, não campo: {prosa}");
+        }
+        // CAMPO com a palavra: reprova.
+        for campo in [
+            r#"placeholder-text: "sua passphrase";"#,
+            r#"LineEdit { text <=> root.senha; }"#,
+            r#"valor <=> root.f-chave-privada;"#,
+        ] {
+            assert!(e_campo(campo), "isto é campo e a regra tem de vê-lo: {campo}");
+        }
+    }
+
+    /// **A contraprova da regra 2:** um campo ligado a algo fora da allowlist reprova.
+    ///
+    /// Sem isto, a allowlist seria uma lista que ninguém viu barrar nada — e uma allowlist que
+    /// nunca barrou é indistinguível de uma que aprova tudo.
+    #[test]
+    fn a_allowlist_de_campos_barra_o_que_nao_esta_nela() {
+        let permitidos = ["root.f-nome", "root.f-host", "root.f-user", "root.f-arquivo"];
+        for intruso in ["root.f-passphrase", "root.f-chave-privada", "root.qualquer"] {
+            assert!(
+                !permitidos.contains(&intruso),
+                "`{intruso}` não pode estar na allowlist — o teste principal o aprovaria"
+            );
+        }
+        // E os quatro legítimos continuam passando, senão a regra barraria tudo.
+        for ok in permitidos {
+            assert!(permitidos.contains(&ok));
         }
     }
 

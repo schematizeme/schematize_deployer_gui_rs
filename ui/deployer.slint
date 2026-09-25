@@ -1,3 +1,5 @@
+import { LineEdit } from "std-widgets.slint";
+
 // Janela do schematize-deployer. Casca visual fina: todos os dados vêm do binário
 // `schematize-deployer` (headless) e todas as ações disparam callbacks tratados no main.rs.
 //
@@ -114,6 +116,130 @@ export struct HostUI {
     op-rotulo: string,
 }
 
+// ---------------------------------------------------------------------------
+// FORMULÁRIO — o que a janela pergunta ANTES de abrir o terminal.
+//
+// ## Por que isto existe, e o que estava errado antes
+//
+// Até aqui, cada botão desta janela disparava um comando FIXO, sem perguntar nada. Quatro dos
+// cinco montavam comando incompleto e o terminal abria só para mostrar um erro de uso:
+//
+//   ssh gen                  → "the following required arguments were not provided: <NAME>"
+//   ssh import --paste       → "colando a chave eu não tenho de onde tirar o nome"
+//   vps add                  → "required: --host <HOST> --user <USER> <ALIAS>"
+//   vps exec <alias>         → "faltou o comando"
+//
+// Abrir um terminal para exibir um erro de argumento é pior que não ter botão: parece que o
+// software tentou e falhou, quando ele nem chegou a tentar.
+//
+// ## O que entra aqui e o que NÃO entra (D5 — segredo nunca aparece)
+//
+// **Entra:** nome de chave, alias, host, usuário, caminho de arquivo. Nada disso é segredo.
+// **NÃO entra:** passphrase e chave privada colada. Esses continuam indo para o terminal, onde
+// o `ssh-keygen` e o deployer os leem sem eco — e sem passar pela memória deste processo.
+//
+// O formulário não substitui o terminal: ele completa o comando que o terminal vai rodar.
+component CampoTexto inherits Rectangle {
+    in property <string> rotulo;
+    in property <string> dica;
+    in-out property <string> valor;
+    in property <bool> obrigatorio: false;
+    height: 58px;
+    VerticalLayout {
+        spacing: 3px;
+        HorizontalLayout {
+            spacing: 4px;
+            Text {
+                text: rotulo;
+                font-size: 11.5px;
+                font-weight: 700;
+                color: Th.text-dim;
+            }
+            // O asterisco marca o obrigatório ANTES de a pessoa errar — um formulário que só
+            // avisa no envio faz preencher tudo para descobrir o que faltava.
+            if obrigatorio: Text { text: "*"; font-size: 11.5px; color: Th.warn; }
+            Rectangle {}
+        }
+        Rectangle {
+            height: 34px;
+            border-radius: 7px;
+            border-width: 1px;
+            border-color: Th.border;
+            background: Th.bg;
+            LineEdit {
+                width: parent.width - 4px;
+                height: parent.height - 4px;
+                x: 2px;
+                y: 2px;
+                placeholder-text: dica;
+                text <=> valor;
+            }
+        }
+    }
+}
+
+// O painel de formulário: título, o porquê, os campos, e o que vai acontecer.
+component Formulario inherits Rectangle {
+    in property <string> titulo;
+    in property <string> explica;
+    in property <string> vai_rodar;
+    in property <bool> pronto: false;
+    callback confirmar();
+    callback cancelar();
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Th.accent;
+    background: Th.surface;
+    height: corpo.preferred-height;
+    corpo := VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+        Text {
+            text: titulo;
+            font-size: 14px;
+            font-weight: 800;
+            color: Th.text;
+        }
+        if explica != "": Text {
+            text: explica;
+            font-size: 11.5px;
+            color: Th.text-dim;
+            wrap: word-wrap;
+        }
+        @children
+        // O COMANDO que vai rodar, visível antes de rodar. Quem clica sabe o que vai acontecer,
+        // e quem prefere o terminal pode copiar a linha em vez de clicar.
+        if vai_rodar != "": Rectangle {
+            height: linha.preferred-height + 12px;
+            border-radius: 7px;
+            background: Th.surface-2;
+            linha := HorizontalLayout {
+                padding: 6px;
+                Text {
+                    text: vai_rodar;
+                    font-size: 11px;
+                    font-family: "monospace";
+                    color: Th.text-dim;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle {}
+            Btn { label: "Cancelar"; clicked => { root.cancelar(); } }
+            Btn {
+                label: "Continuar no terminal";
+                primary: true;
+                // Desabilitado enquanto falta campo obrigatório: o botão que abre um terminal
+                // para mostrar erro de argumento é exatamente o que esta tela veio consertar.
+                enabled: pronto;
+                clicked => { root.confirmar(); }
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "schematize · deployer";
     preferred-width: 820px;
@@ -146,6 +272,25 @@ export component MainWindow inherits Window {
     in-out property <string> cofre-erro;
 
     in-out property <string> msg;
+
+    // ---- FORMULÁRIO ----
+    //
+    // Um só estado para os três formulários (gerar, importar, adicionar host), porque só um
+    // fica aberto por vez. Três conjuntos de campos dariam três estados para manter em sincronia
+    // — e o que sai de sincronia é o que mostra o campo de um formulário dentro de outro.
+    //
+    // 0 = nenhum · 1 = gerar chave · 2 = importar chave · 3 = adicionar host
+    in-out property <int> form: 0;
+    in-out property <string> f-nome;      // nome da chave, ou alias do host
+    in-out property <string> f-host;      // IP/hostname
+    in-out property <string> f-user;      // usuário no host
+    in-out property <string> f-arquivo;   // caminho do arquivo da chave (import)
+    // `true` = importar COLANDO (a chave vai para o stdin do terminal, nunca para esta janela).
+    in-out property <bool> f-colar: false;
+
+    callback form-abrir(int);
+    callback form-fechar();
+    callback form-confirmar();
 
     callback recarregar();
     callback alternar-tema();
@@ -195,11 +340,72 @@ export component MainWindow inherits Window {
             spacing: 10px;
             HorizontalLayout {
                 spacing: 8px;
-                Btn { label: "Gerar chave"; primary: true; clicked => { root.gerar-chave(); } }
-                Btn { label: "Importar"; clicked => { root.importar-chave(); } }
+                Btn { label: "Gerar chave"; primary: true; clicked => { root.form-abrir(1); } }
+                Btn { label: "Importar"; clicked => { root.form-abrir(2); } }
                 Btn { label: "Recarregar"; clicked => { root.recarregar(); } }
                 Rectangle { horizontal-stretch: 1; }
             }
+
+            // GERAR — o CLI exige `<NAME>`. Sem perguntar, o terminal abria só para dizer
+            // "required arguments were not provided".
+            if root.form == 1: Formulario {
+                titulo: "Gerar uma chave nova";
+                explica: "O par nasce em ~/.ssh/<nome>. A passphrase é pedida no terminal, pelo próprio ssh-keygen.";
+                vai_rodar: "schematize-deployer ssh gen " + (root.f-nome == "" ? "<nome>" : root.f-nome);
+                pronto: root.f-nome != "";
+                confirmar => { root.form-confirmar(); }
+                cancelar => { root.form-fechar(); }
+                CampoTexto {
+                    rotulo: "Nome da chave";
+                    dica: "ex.: producao, cliente-x";
+                    obrigatorio: true;
+                    valor <=> root.f-nome;
+                }
+            }
+
+            // IMPORTAR — dois caminhos, e a diferença é ONDE a chave privada passa.
+            if root.form == 2: Formulario {
+                titulo: "Importar uma chave que já existe";
+                explica: root.f-colar
+                    ? "Colando: o terminal abre e você cola a chave lá. Ela vai pelo stdin — não entra no histórico do shell, não aparece no `ps`, e não passa por esta janela."
+                    : "De um arquivo: informe o caminho da chave PRIVADA (não o .pub). O nome, sem preencher, vira o nome do arquivo.";
+                vai_rodar: root.f-colar
+                    ? "schematize-deployer ssh import --paste --name " + (root.f-nome == "" ? "<nome>" : root.f-nome)
+                    : "schematize-deployer ssh import " + (root.f-arquivo == "" ? "<arquivo>" : root.f-arquivo)
+                        + (root.f-nome == "" ? "" : " --name " + root.f-nome);
+                // Colando, o nome é OBRIGATÓRIO — é o erro que a pessoa viu: sem arquivo não há
+                // de onde tirá-lo. De arquivo, o nome é opcional e o arquivo é que manda.
+                pronto: root.f-colar ? root.f-nome != "" : root.f-arquivo != "";
+                confirmar => { root.form-confirmar(); }
+                cancelar => { root.form-fechar(); }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Btn {
+                        label: "De um arquivo";
+                        primary: !root.f-colar;
+                        clicked => { root.f-colar = false; }
+                    }
+                    Btn {
+                        label: "Colar a chave";
+                        primary: root.f-colar;
+                        clicked => { root.f-colar = true; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if !root.f-colar: CampoTexto {
+                    rotulo: "Arquivo da chave privada";
+                    dica: "ex.: ~/backup/id_ed25519";
+                    obrigatorio: true;
+                    valor <=> root.f-arquivo;
+                }
+                CampoTexto {
+                    rotulo: root.f-colar ? "Nome da chave" : "Nome (opcional — sem isto, o do arquivo)";
+                    dica: "ex.: producao";
+                    obrigatorio: root.f-colar;
+                    valor <=> root.f-nome;
+                }
+            }
+
             // Gerar e importar abrem TERMINAL: gerar pede uma passphrase, e importar pode
             // pedir a de uma chave que já tem. Passphrase digitada numa janela Slint iria para
             // a memória deste processo sem precisar ir — o `ssh-keygen` já sabe lê-la sem eco.
@@ -324,10 +530,43 @@ export component MainWindow inherits Window {
             spacing: 10px;
             HorizontalLayout {
                 spacing: 8px;
-                Btn { label: "Adicionar host"; primary: true; clicked => { root.adicionar-host(); } }
+                Btn { label: "Adicionar host"; primary: true; clicked => { root.form-abrir(3); } }
                 Btn { label: "Recarregar"; clicked => { root.recarregar(); } }
                 Rectangle { horizontal-stretch: 1; }
             }
+
+            // ADICIONAR HOST — o CLI exige `<ALIAS> --host --user`. Nenhum dos três é segredo,
+            // então os três são perguntados AQUI; o que vai para o terminal é a confirmação da
+            // host key, que precisa da pessoa olhando a fingerprint.
+            if root.form == 3: Formulario {
+                titulo: "Registrar um host";
+                explica: "Ele nasce em `prd` + `readonly`, que é o mais restritivo — ajuste depois com `policy`. A chave é escolhida pelo seletor do próprio CLI, no terminal.";
+                vai_rodar: "schematize-deployer vps add " + (root.f-nome == "" ? "<alias>" : root.f-nome)
+                    + " --host " + (root.f-host == "" ? "<ip>" : root.f-host)
+                    + " --user " + (root.f-user == "" ? "<user>" : root.f-user);
+                pronto: root.f-nome != "" && root.f-host != "" && root.f-user != "";
+                confirmar => { root.form-confirmar(); }
+                cancelar => { root.form-fechar(); }
+                CampoTexto {
+                    rotulo: "Alias";
+                    dica: "nome curto: letras, números, '.', '_' ou '-'";
+                    obrigatorio: true;
+                    valor <=> root.f-nome;
+                }
+                CampoTexto {
+                    rotulo: "Host";
+                    dica: "IP ou hostname";
+                    obrigatorio: true;
+                    valor <=> root.f-host;
+                }
+                CampoTexto {
+                    rotulo: "Usuário";
+                    dica: "ex.: root, deploy, ubuntu";
+                    obrigatorio: true;
+                    valor <=> root.f-user;
+                }
+            }
+
             Text {
                 text: "Conectar abre um TERMINAL: uma sessão SSH é interativa, e não cabe numa janela Slint.";
                 font-size: 11.5px;
