@@ -34,6 +34,7 @@
 
 mod cli;
 mod json;
+mod procedencia;
 mod redacao;
 mod telas;
 mod terminal;
@@ -286,7 +287,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Responder e sair é o contrato mínimo de um binário de linha de comando — inclusive de um
     // que normalmente abre janela.
     if std::env::args().skip(1).any(|a| a == "--version" || a == "-V") {
-        println!("schematize-deployer-gui {}", env!("CARGO_PKG_VERSION"));
+        println!("schematize-deployer-gui {}", procedencia::rotulo_versao());
         return Ok(());
     }
 
@@ -714,6 +715,19 @@ mod tests {
 
 #[cfg(test)]
 mod tests_versao {
+    /// **A janela responde a versão COM a procedência, como o CLI irmão** (SHA, e `-sujo` se
+    /// o build tinha mudança não commitada). O número seco não distingue dois binários.
+    #[test]
+    fn a_versao_carrega_a_procedencia() {
+        let fonte = include_str!("main.rs");
+        let producao = fonte.split("#[cfg(test)]").next().expect("há código antes dos testes");
+        assert!(
+            !producao.contains("env!(\"CARGO_PKG_VERSION\")"),
+            "a janela usou o número seco — use `procedencia::rotulo_versao()`, que traz o SHA"
+        );
+        assert!(producao.contains("procedencia::rotulo_versao()"), "a versão perdeu a procedência");
+    }
+
     /// **A janela responde `--version` e SAI, em vez de abrir.**
     ///
     /// Lê o próprio fonte e exige que a checagem seja a PRIMEIRA coisa do `main` — antes de
