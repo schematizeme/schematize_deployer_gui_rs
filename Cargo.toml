@@ -1,7 +1,7 @@
 [package]
 # O CRATE segue o nome do repositório; o BINÁRIO é `schematize-deployer-gui`.
 name = "schematize-deployer-gui"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Janela (Slint) do schematize-deployer — casca VISUAL fina por cima do binário `schematize-deployer` (headless, std-only). Chaves SSH, hosts e o estado do cofre. A chave privada e o valor de segredo NUNCA aparecem: a confirmação de identidade é o fingerprint, que é público."
 license = "MIT"
