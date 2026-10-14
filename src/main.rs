@@ -34,6 +34,7 @@
 
 mod cli;
 mod json;
+mod market_parasita;
 mod procedencia;
 mod redacao;
 mod telas;
@@ -290,6 +291,10 @@ fn main() -> Result<(), slint::PlatformError> {
         println!("schematize-deployer-gui {}", procedencia::rotulo_versao());
         return Ok(());
     }
+
+    // Parasita do market (contrato 2026-10-13): garante schematize-market e -gui em
+    // ~/.cargo/bin ANTES de abrir a janela. Nunca derruba a janela — falha vira linha no stderr.
+    market_parasita::garantir();
 
     let w = MainWindow::new()?;
     w.set_aba(aba_inicial(std::env::args().skip(1)));
@@ -757,5 +762,22 @@ mod tests_versao {
              não responder, porque a janela já subiu"
         );
         assert!(corpo[versao..janela].contains("return"), "tem de RESPONDER e SAIR");
+    }
+
+    /// O parasita do market tem de rodar DEPOIS do `--version` (que sai antes) e ANTES da janela
+    /// (contrato market-parasita, regra 7: "nas janelas, antes de abrir a janela").
+    #[test]
+    fn garante_o_market_entre_o_version_e_a_janela() {
+        let fonte = include_str!("main.rs");
+        let producao = fonte.split("#[cfg(test)]").next().unwrap();
+        let i = producao.find("fn main(").expect("há um main");
+        let corpo = &producao[i..];
+        let versao = corpo.find("\"--version\"").expect("o main responde --version");
+        let parasita = corpo
+            .find("market_parasita::garantir()")
+            .expect("a janela tem de chamar o parasita do market");
+        let janela = corpo.find("MainWindow::new").expect("o main cria a janela");
+        assert!(versao < parasita, "o parasita roda ANTES do --version — baixaria em --version");
+        assert!(parasita < janela, "o parasita roda DEPOIS de abrir a janela — tem de ser antes");
     }
 }
